@@ -1,0 +1,48 @@
+# Render "Blueprint": creates the HeavyHire API from this repo in one click.
+# Render Dashboard → New → Blueprint → pick this repo.
+# Secrets marked `sync: false` are asked for during setup.
+services:
+  - type: web
+    name: heavyhire-api
+    runtime: node
+    plan: starter # NOT free: the free plan sleeps, which stops the booking-expiry jobs
+    region: singapore # closest Render region to India
+    rootDir: .
+    buildCommand: npm i -g pnpm@10 && pnpm install --frozen-lockfile && pnpm --filter api build && pnpm --filter api db:deploy
+    startCommand: pnpm --filter api start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        sync: false
+      - key: WEB_URL
+        sync: false
+      - key: API_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: FILE_URL_SECRET
+        generateValue: true
+      - key: ADMIN_PHONE
+        sync: false
+      - key: MSG91_AUTH_KEY
+        sync: false
+      - key: MSG91_OTP_TEMPLATE_ID
+        sync: false
+      - key: MSG91_WHATSAPP_NUMBER
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false

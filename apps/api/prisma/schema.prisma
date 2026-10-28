@@ -1,0 +1,484 @@
+// =============================================================================
+// HeavyHire — Database schema (Prisma + PostgreSQL)
+// =============================================================================
+// Conventions used in this file:
+//   • IDs are cuid strings (e.g. "clx9f2..."), safe to show in URLs.
+//   • ALL money is stored as Int in PAISE (₹1 = 100 paise), the same unit
+//     Razorpay uses. This avoids decimal rounding bugs. ₹1,000 → 100000.
+//   • createdAt / updatedAt are filled in automatically by Prisma.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// USERS & LOGIN
+// -----------------------------------------------------------------------------
+
+enum UserRole {
+  USER // normal person: can rent, and can also become a vendor
+  ADMIN // HeavyHire staff
+}
+
+enum Language {
+  EN
+  HI
+}
+
+/// Anyone who logs in with their phone number.
+/// A user becomes a vendor when they create a Vendor profile (one account, two roles).
+model User {
+  id        String   @id @default(cuid())
+  phone     String   @unique // stored as +91XXXXXXXXXX
+  name      String?
+  email     String?
+  language  Language @default(EN)
+  role      UserRole @default(USER)
+  isBlocked Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vendor        Vendor?
+  bookings      Booking[]      @relation("RenterBookings")
+  reviews       Review[]
+  refreshTokens RefreshToken[]
+  notifications Notification[]
+}
+
+/// One-time passwords sent by SMS. We store only a hash, never the real code.
+model OtpCode {
+  id        String    @id @default(cuid())
+  phone     String
+  codeHash  String
+  attempts  Int       @default(0) // block after 5 wrong tries
+  expiresAt DateTime // 5 minutes after creation
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([phone, createdAt])
+}
+
+/// Keeps users logged in. Access tokens (JWT) are short-lived;
+/// this long-lived token gets a new one. Deleting a row = logging that device out.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// -----------------------------------------------------------------------------
+// VENDORS (machine owners)
+// -----------------------------------------------------------------------------
+
+enum ApprovalStatus {
+  PENDING // waiting for admin
+  APPROVED
+  REJECTED
+}
+
+enum IdDocType {
+  PAN
+  AADHAAR
+}
+
+model Vendor {
+  id           String  @id @default(cuid())
+  userId       String  @unique
+  businessName String // can just be the owner's name for individuals
+  city         String  @default("Bengaluru")
+  address      String?
+  gstin        String? // optional; small owners may not have GST
+
+  // KYC: one ID document. Stored PRIVATELY: we keep a storage key, and admins
+  // get a short-lived link to view it. (Aadhaar: ask for a MASKED copy.)
+  idDocType IdDocType
+  idDocKey  String
+
+  // Where we send their money: either UPI or bank account.
+  upiId             String?
+  bankAccountName   String?
+  bankAccountNumber String?
+  bankIfsc          String?
+  razorpayAccountId String? // filled in when linked to Razorpay Route (later)
+
+  status          ApprovalStatus @default(PENDING)
+  rejectionReason String?
+  approvedAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  machines Machine[]
+  bookings Booking[]
+  payouts  Payout[]
+  reviews  Review[]
+
+  @@index([status])
+}
+
+// -----------------------------------------------------------------------------
+// MACHINES
+// -----------------------------------------------------------------------------
+
+/// Machine types: JCB, Excavator, Tipper, Crane, Road roller... (managed by admin)
+model Category {
+  id        String  @id @default(cuid())
+  slug      String  @unique // "jcb", "excavator" (used in URLs)
+  nameEn    String // "Excavator"
+  nameHi    String // "एक्सकेवेटर"
+  iconUrl   String?
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  machines Machine[]
+}
+
+enum MachineStatus {
+  PENDING // waiting for admin approval
+  APPROVED // live in search
+  REJECTED
+  PAUSED // vendor turned it off temporarily
+}
+
+model Machine {
+  id         String @id @default(cuid())
+  vendorId   String
+  categoryId String
+
+  brand          String // "JCB", "Tata Hitachi"
+  model          String // "3DX Super"
+  year           Int
+  registrationNo String? // vehicle number from RC
+  capacity       String? // free text, e.g. "0.9 m³ bucket", "14 ton"
+  description    String?
+  rcDocKey       String // private storage key of the RC (registration certificate)
+
+  // Where the machine is parked. Used for "machines near you".
+  city            String  @default("Bengaluru")
+  area            String? // "Whitefield", "Electronic City"
+  lat             Float
+  lng             Float
+  serviceRadiusKm Int     @default(30)
+
+  // Pricing (paise). At least one of hour/day must be set.
+  pricePerHour    Int?
+  pricePerDay     Int? // one 8-hour shift
+  minHours        Int  @default(4) // minimum hours for hourly bookings
+  transportCharge Int  @default(0) // one-time delivery charge; 0 = included
+
+  withOperator Boolean @default(true) // MVP: always true
+  fuelIncluded Boolean @default(true)
+
+  status          MachineStatus @default(PENDING)
+  rejectionReason String?
+
+  // Cached from reviews, so search can sort by rating quickly.
+  ratingAvg   Float @default(0)
+  ratingCount Int   @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vendor   Vendor         @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  category Category       @relation(fields: [categoryId], references: [id])
+  photos   MachinePhoto[]
+  blocks   MachineBlock[]
+  bookings Booking[]
+  reviews  Review[]
+
+  @@index([status, categoryId])
+  @@index([lat, lng])
+  @@index([vendorId])
+}
+
+model MachinePhoto {
+  id        String @id @default(cuid())
+  machineId String
+  url       String
+  publicId  String // Cloudinary ID, needed to delete the image
+  sortOrder Int    @default(0) // 0 = cover photo
+
+  machine Machine @relation(fields: [machineId], references: [id], onDelete: Cascade)
+
+  @@index([machineId])
+}
+
+/// Dates when the vendor says the machine is NOT available (repair, own use...).
+/// Busy dates from bookings are worked out from the Booking table.
+model MachineBlock {
+  id        String   @id @default(cuid())
+  machineId String
+  startAt   DateTime
+  endAt     DateTime
+  reason    String?
+  createdAt DateTime @default(now())
+
+  machine Machine @relation(fields: [machineId], references: [id], onDelete: Cascade)
+
+  @@index([machineId, startAt])
+}
+
+// -----------------------------------------------------------------------------
+// BOOKINGS
+// -----------------------------------------------------------------------------
+
+enum PricingUnit {
+  HOUR
+  DAY
+}
+
+enum PaymentPlan {
+  FULL // pay everything online now
+  ADVANCE // pay a part online now, the rest to the operator at site
+}
+
+/// Renter-facing labels are in brackets.
+enum BookingStatus {
+  PENDING_PAYMENT // booking created, renter hasn't finished paying yet
+  REQUESTED // paid; waiting for vendor to accept (2 hrs)      [Booked]
+  CONFIRMED // vendor accepted                                  [Booked ✓]
+  ON_THE_WAY // machine travelling to site                       [On the way]
+  WORKING // machine reached site, job in progress             [Working]
+  COMPLETED // job finished                                       [Done]
+  REJECTED // vendor said no            → full refund
+  EXPIRED // vendor didn't reply in time → full refund
+  CANCELLED // cancelled by renter/admin  → refund as per rules
+}
+
+model Booking {
+  id            String @id @default(cuid())
+  bookingNumber Int    @unique @default(autoincrement()) // shown as "HH-1001"
+
+  renterId  String
+  machineId String
+  vendorId  String // copied from machine, makes vendor queries simple
+
+  // When
+  unit     PricingUnit
+  quantity Int // number of hours or days
+  startAt  DateTime
+  endAt    DateTime
+
+  // Where
+  siteAddress String
+  siteLat     Float
+  siteLng     Float
+  notes       String?
+
+  // Price snapshot (paise), saved at booking time so later price edits
+  // by the vendor never change an existing booking.
+  rate             Int // price per hour/day at booking time
+  rentAmount       Int // rate × quantity
+  transportAmount  Int
+  gstPercent       Float
+  gstAmount        Int
+  totalAmount      Int // what the renter pays in total
+  commissionAmount Int // HeavyHire's cut
+  vendorAmount     Int // what the vendor receives
+
+  paymentPlan     PaymentPlan @default(FULL)
+  payNowAmount    Int // charged online
+  payAtSiteAmount Int // ADVANCE plan: renter pays this to the operator at site
+  amountPaid      Int         @default(0) // paid online so far (refunds are tracked in Refund)
+
+  status         BookingStatus @default(PENDING_PAYMENT)
+  vendorReplyBy  DateTime? // REQUESTED → EXPIRED if no reply by this time
+  operatorName   String?
+  operatorPhone  String?
+  cancelReason   String?
+  reminderSentAt DateTime?
+  rejectedReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  renter   User           @relation("RenterBookings", fields: [renterId], references: [id])
+  machine  Machine        @relation(fields: [machineId], references: [id])
+  vendor   Vendor         @relation(fields: [vendorId], references: [id])
+  events   BookingEvent[]
+  payments Payment[]
+  payout   Payout?
+  review   Review?
+
+  @@index([renterId, createdAt])
+  @@index([vendorId, status])
+  @@index([machineId, startAt])
+  @@index([status, vendorReplyBy])
+}
+
+/// History of every status change: shows the timeline and helps settle disputes.
+model BookingEvent {
+  id        String        @id @default(cuid())
+  bookingId String
+  status    BookingStatus
+  actorId   String? // user who did it; null = system (e.g. auto-expire)
+  note      String?
+  createdAt DateTime      @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, createdAt])
+}
+
+// -----------------------------------------------------------------------------
+// MONEY: payments in, refunds, payouts out
+// -----------------------------------------------------------------------------
+
+enum PaymentKind {
+  FULL // whole amount paid online
+  ADVANCE // part paid online, rest paid to the operator at site
+}
+
+enum PaymentStatus {
+  CREATED // Razorpay order created, renter on the payment screen
+  PAID
+  FAILED
+  REFUNDED // fully refunded
+  PARTIALLY_REFUNDED
+}
+
+/// One row per Razorpay order (one per booking in the MVP).
+model Payment {
+  id                String        @id @default(cuid())
+  bookingId         String
+  kind              PaymentKind
+  amount            Int
+  status            PaymentStatus @default(CREATED)
+  razorpayOrderId   String        @unique
+  razorpayPaymentId String?       @unique
+  method            String? // "upi", "card", "netbanking"
+  refundedAmount    Int           @default(0)
+  paidAt            DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking Booking  @relation(fields: [bookingId], references: [id])
+  refunds Refund[]
+
+  @@index([bookingId])
+}
+
+enum RefundStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+model Refund {
+  id               String       @id @default(cuid())
+  paymentId        String
+  amount           Int
+  reason           String
+  status           RefundStatus @default(PENDING)
+  razorpayRefundId String?      @unique
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  payment Payment @relation(fields: [paymentId], references: [id])
+
+  @@index([paymentId])
+}
+
+enum PayoutStatus {
+  PENDING // job done, money not sent yet
+  PAID
+  FAILED
+}
+
+/// Money we send to the vendor for one completed booking.
+model Payout {
+  id        String       @id @default(cuid())
+  vendorId  String
+  bookingId String       @unique
+  amount    Int
+  status    PayoutStatus @default(PENDING)
+  reference String? // Razorpay transfer ID or bank UTR number
+  paidAt    DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  vendor  Vendor  @relation(fields: [vendorId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@index([vendorId, status])
+}
+
+// -----------------------------------------------------------------------------
+// REVIEWS & NOTIFICATIONS
+// -----------------------------------------------------------------------------
+
+/// One review per completed booking.
+model Review {
+  id        String   @id @default(cuid())
+  bookingId String   @unique
+  renterId  String
+  machineId String
+  vendorId  String
+  rating    Int // 1 to 5
+  comment   String?
+  createdAt DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+  renter  User    @relation(fields: [renterId], references: [id])
+  machine Machine @relation(fields: [machineId], references: [id])
+  vendor  Vendor  @relation(fields: [vendorId], references: [id])
+
+  @@index([machineId, createdAt])
+}
+
+enum NotificationChannel {
+  SMS
+  WHATSAPP
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+/// Log of every SMS/WhatsApp message we send (useful when someone says
+/// "I never got the message").
+model Notification {
+  id        String              @id @default(cuid())
+  userId    String
+  channel   NotificationChannel
+  template  String // e.g. "booking_confirmed"
+  payload   Json // the values filled into the template
+  status    NotificationStatus  @default(QUEUED)
+  error     String?
+  createdAt DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// -----------------------------------------------------------------------------
+// PLATFORM SETTINGS (admin can change these without touching code)
+// -----------------------------------------------------------------------------
+
+/// Always exactly one row, with id = 1.
+model Settings {
+  id                      Int      @id @default(1)
+  commissionPercent       Float    @default(10)
+  gstPercent              Float    @default(18)
+  advancePercent          Float    @default(25) // for PaymentPlan.ADVANCE
+  vendorReplyMinutes      Int      @default(120) // 2 hours to accept
+  freeCancelHoursBefore   Int      @default(24) // full refund if cancelled this early
+  lateCancelRefundPercent Float    @default(50) // refund % if cancelled later than that
+  updatedAt               DateTime @updatedAt
+}

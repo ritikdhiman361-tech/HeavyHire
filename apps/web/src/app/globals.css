@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+/* HeavyHire colours: construction yellow + dark steel grey */
+@theme {
+  --color-brand-50: #fffbeb;
+  --color-brand-100: #fef3c7;
+  --color-brand-200: #fde68a;
+  --color-brand-400: #fbbf24;
+  --color-brand-500: #f5b301;
+  --color-brand-600: #d99a00;
+  --color-brand-700: #a16207;
+  --color-ink: #1c1f24;
+  --font-sans: "Inter", "Noto Sans Devanagari", ui-sans-serif, system-ui, sans-serif;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  @apply bg-stone-50 text-ink antialiased;
+}
+
+/* Hide the number arrows on <input type="number"> (they're tiny on phones) */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
